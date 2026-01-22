@@ -8,7 +8,12 @@ export default defineConfig({
       output: {
         entryFileNames: "assets/ofg-premium.js",
         chunkFileNames: "assets/ofg-chunk.js",
-        assetFileNames: "assets/ofg-premium.css",
+        assetFileNames: (assetInfo) => {
+          if (assetInfo.name && assetInfo.name.endsWith(".css")) {
+            return "assets/ofg-premium.css";
+          }
+          return "assets/[name][extname]";
+        },
       },
     },
   },
