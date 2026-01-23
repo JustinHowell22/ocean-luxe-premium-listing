@@ -42,7 +42,8 @@ export default function PremiumListing() {
     videoTourUrl: 'https://www.youtube.com/watch?v=example',
     latitude: 25.7907,
     longitude: -80.1300,
-    description: 'Discover unparalleled luxury in this stunning oceanfront residence located in the heart of Miami Beach. This architectural masterpiece features floor-to-ceiling windows with breathtaking ocean views, a gourmet chef\'s kitchen with top-of-the-line appliances, and an expansive open-concept living space perfect for entertaining. The primary suite offers a private balcony overlooking the Atlantic, while the spa-inspired bathrooms provide a serene retreat. Enjoy resort-style amenities including a private pool, state-of-the-art fitness center, and direct beach access. This is coastal living at its finest.',
+    description:
+      "Discover unparalleled luxury in this stunning oceanfront residence located in the heart of Miami Beach. This architectural masterpiece features floor-to-ceiling windows with breathtaking ocean views, a gourmet chef's kitchen with top-of-the-line appliances, and an expansive open-concept living space perfect for entertaining. The primary suite offers a private balcony overlooking the Atlantic, while the spa-inspired bathrooms provide a serene retreat. Enjoy resort-style amenities including a private pool, state-of-the-art fitness center, and direct beach access. This is coastal living at its finest.",
     photos: [
       'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1920&q=80',
       'https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?w=1920&q=80',
@@ -59,6 +60,18 @@ export default function PremiumListing() {
     ]
   };
 
+  // Helper: apply listing + normalize photos
+  const applyListingData = (listingData) => {
+    setListing(listingData);
+
+    const rawPhotos = listingData?.photos || listingData?.property?.photos || [];
+    const normalizedPhotos = rawPhotos
+      .map((photo) => (typeof photo === 'string' ? photo : photo?.url))
+      .filter(Boolean);
+
+    setPhotos(normalizedPhotos);
+  };
+
   // Scroll detection
   useEffect(() => {
     const handleScroll = () => {
@@ -68,11 +81,40 @@ export default function PremiumListing() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Fetch listing data
+  // Receive listing data from parent (AgentFire page) when embedded in an iframe
+  useEffect(() => {
+    const onMessage = (event) => {
+      // Parent page should be onefloridagroup.com
+      if (event.origin !== 'https://onefloridagroup.com') return;
+
+      const msg = event.data;
+      if (msg?.type === 'OFG_LISTING' && msg?.listing) {
+        setError(null);
+        setIsLoading(false);
+        applyListingData(msg.listing);
+      }
+    };
+
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fetch listing data (standalone mode). In iframe mode, parent sends data.
   useEffect(() => {
     const fetchListing = async () => {
+      const isEmbedded = window.self !== window.top;
+
       if (!mlsId) {
-        // Use placeholder data for demo
+        // No ID: demo mode
+        setListing(placeholderListing);
+        setPhotos(placeholderListing.photos);
+        setIsLoading(false);
+        return;
+      }
+
+      if (isEmbedded) {
+        // In iframe mode, parent (onefloridagroup.com) will send listing via postMessage
         setListing(placeholderListing);
         setPhotos(placeholderListing.photos);
         setIsLoading(false);
@@ -97,21 +139,15 @@ export default function PremiumListing() {
         }
 
         const data = await response.json();
-        
-        if (!data.listings || data.listings.length === 0) {
+
+        // AgentFire returns { data: { listings: [...] } }
+        const listings = data?.data?.listings || [];
+
+        if (!listings.length) {
           throw new Error('Listing not found');
         }
 
-        const listingData = data.listings[0];
-        setListing(listingData);
-
-        // Normalize photos
-        const rawPhotos = listingData.photos || listingData.property?.photos || [];
-        const normalizedPhotos = rawPhotos.map(photo => 
-          typeof photo === 'string' ? photo : photo.url
-        ).filter(Boolean);
-        
-        setPhotos(normalizedPhotos);
+        applyListingData(listings[0]);
       } catch (err) {
         console.error('Fetch error:', err);
         setError(err.message || 'Failed to load listing');
@@ -121,6 +157,7 @@ export default function PremiumListing() {
     };
 
     fetchListing();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mlsId]);
 
   // Extract listing fields with fallbacks
@@ -133,8 +170,14 @@ export default function PremiumListing() {
   };
 
   const getSqft = () => {
-    return listing?.livingArea || listing?.sqft || listing?.squareFeet || 
-           listing?.property?.livingArea || listing?.property?.sqft || null;
+    return (
+      listing?.livingArea ||
+      listing?.sqft ||
+      listing?.squareFeet ||
+      listing?.property?.livingArea ||
+      listing?.property?.sqft ||
+      null
+    );
   };
 
   const handleFullscreen = (index) => {
@@ -176,18 +219,11 @@ export default function PremiumListing() {
   return (
     <div className="min-h-screen bg-slate-950">
       {/* Sticky Contact Bar */}
-      <ContactBar 
-        isScrolled={isScrolled} 
-        onScheduleClick={() => setIsDrawerOpen(true)} 
-      />
+      <ContactBar isScrolled={isScrolled} onScheduleClick={() => setIsDrawerOpen(true)} />
 
       {/* Hero Gallery */}
       <div className="relative">
-        <HeroGallery
-          photos={photos}
-          activeIndex={activePhotoIndex}
-          onPhotoChange={setActivePhotoIndex}
-        />
+        <HeroGallery photos={photos} activeIndex={activePhotoIndex} onPhotoChange={setActivePhotoIndex} />
 
         {/* Content Overlay */}
         <div className="absolute bottom-0 left-0 right-0 z-10">
@@ -200,7 +236,7 @@ export default function PremiumListing() {
               className="mb-4"
             >
               <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white tracking-tight">
-                ${listing?.price?.toLocaleString()}
+                {typeof listing?.price === 'number' ? `$${listing.price.toLocaleString()}` : ''}
               </h1>
             </motion.div>
 
@@ -211,9 +247,7 @@ export default function PremiumListing() {
               transition={{ delay: 0.1, duration: 0.6 }}
               className="mb-6"
             >
-              <p className="text-xl sm:text-2xl text-white/90 font-light">
-                {listing?.address?.full}
-              </p>
+              <p className="text-xl sm:text-2xl text-white/90 font-light">{listing?.address?.full}</p>
             </motion.div>
 
             {/* Stats */}
@@ -223,11 +257,7 @@ export default function PremiumListing() {
               transition={{ delay: 0.2, duration: 0.6 }}
               className="mb-8"
             >
-              <ListingStats
-                beds={getBeds()}
-                baths={getBaths()}
-                sqft={getSqft()}
-              />
+              <ListingStats beds={getBeds()} baths={getBaths()} sqft={getSqft()} />
             </motion.div>
 
             {/* Contact Buttons */}
@@ -266,20 +296,17 @@ export default function PremiumListing() {
 
         {/* Virtual Tours */}
         {(listing?.virtualTourUrl || listing?.videoTourUrl) && (
-          <VirtualTours 
-            virtualTourUrl={listing?.virtualTourUrl}
-            videoTourUrl={listing?.videoTourUrl}
-          />
+          <VirtualTours virtualTourUrl={listing?.virtualTourUrl} videoTourUrl={listing?.videoTourUrl} />
         )}
 
         {/* Mortgage Calculator */}
         <MortgageCalculator propertyPrice={listing?.price} />
 
-        {/* Listing Agent */}
+        {/* Listing Agent (we can wire per-listing agent later) */}
         <ListingAgent onScheduleClick={() => setIsDrawerOpen(true)} />
 
         {/* Property Map */}
-        <PropertyMap 
+        <PropertyMap
           address={listing?.address?.full}
           latitude={listing?.latitude}
           longitude={listing?.longitude}
@@ -287,11 +314,7 @@ export default function PremiumListing() {
       </div>
 
       {/* Schedule Tour Drawer */}
-      <ScheduleDrawer
-        isOpen={isDrawerOpen}
-        onClose={() => setIsDrawerOpen(false)}
-        listing={listing}
-      />
+      <ScheduleDrawer isOpen={isDrawerOpen} onClose={() => setIsDrawerOpen(false)} listing={listing} />
 
       {/* Fullscreen Gallery */}
       <FullscreenGallery
