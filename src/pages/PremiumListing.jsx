@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Loader2, AlertCircle } from 'lucide-react';
-
 import HeroGallery from '@/components/listing/HeroGallery';
 import ThumbnailStrip from '@/components/listing/ThumbnailStrip';
 import ContactBar, { FloatingContactButtons } from '@/components/listing/ContactBar';
@@ -53,42 +52,72 @@ class PremiumErrorBoundary extends React.Component {
   }
 }
 
-/**
- * Safe numeric conversion for strings like "3,200", "$2,850,000", etc.
- * Returns null if it can't be parsed.
- */
 function toNumber(v) {
-  if (v === null || v === undefined) return null;
-  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'number') return v;
   if (typeof v === 'string') {
-    const cleaned = v.replace(/,/g, '').replace(/[^\d.]/g, '').trim();
-    if (!cleaned) return null;
+    const cleaned = v.replace(/[^\d.]/g, '');
     const n = Number(cleaned);
     return Number.isFinite(n) ? n : null;
   }
   return null;
 }
 
-/**
- * Critical: MLS sometimes returns baths as an object like:
- * { total: 3.5, full: 3, half: 1 }
- * React cannot render objects => crash (your error #31).
- * This returns a single number (like 3.5) or null.
- */
-function normalizeBaths(b) {
-  if (b && typeof b === 'object') {
-    // prefer total if present
-    if (typeof b.total === 'number' && Number.isFinite(b.total)) return b.total;
+function normalizePhotoUrl(p) {
+  if (!p) return null;
+  if (typeof p === 'string') return p;
 
-    const full = toNumber(b.full) ?? 0;
-    const half = toNumber(b.half) ?? 0;
-    const quarter = toNumber(b.quarter ?? b.qtr) ?? 0;
-    const threeQuarter = toNumber(b.threeQuarter ?? b.three_quarter) ?? 0;
+  // try common fields
+  return (
+    p.url ||
+    p.full ||
+    p.lg ||
+    p.large ||
+    p.src ||
+    p.href ||
+    p.original ||
+    p.image ||
+    p.permalink ||
+    null
+  );
+}
 
-    const total = full + half * 0.5 + quarter * 0.25 + threeQuarter * 0.75;
-    return total > 0 ? total : null;
+function extractPhotosAnyShape(listingObj) {
+  if (!listingObj || typeof listingObj !== 'object') return [];
+
+  const candidates =
+    listingObj.photos ||
+    listingObj.property?.photos ||
+    listingObj.media?.photos ||
+    listingObj.property?.media?.photos ||
+    listingObj.images ||
+    listingObj.property?.images ||
+    listingObj.media ||
+    listingObj.property?.media ||
+    [];
+
+  const arr = Array.isArray(candidates) ? candidates : [];
+
+  const urls = arr
+    .map(normalizePhotoUrl)
+    .filter(Boolean);
+
+  // sometimes photos come under “media” but as objects with nested keys; try deeper
+  if (urls.length) return urls;
+
+  // fallback: scan a few likely nested arrays
+  const deepArrays = [
+    listingObj?.property?.media?.photos,
+    listingObj?.property?.media?.images,
+    listingObj?.media?.images,
+    listingObj?.media?.photo,
+  ].filter(Array.isArray);
+
+  for (const a of deepArrays) {
+    const u = a.map(normalizePhotoUrl).filter(Boolean);
+    if (u.length) return u;
   }
-  return toNumber(b);
+
+  return [];
 }
 
 export default function PremiumListing() {
@@ -131,12 +160,7 @@ export default function PremiumListing() {
 
   const normalizeListing = (raw) => {
     const safe = raw && typeof raw === 'object' ? raw : {};
-
-    const priceNum =
-      toNumber(safe.price) ??
-      toNumber(safe.listPrice) ??
-      toNumber(safe.property?.price) ??
-      toNumber(safe.property?.listPrice);
+    const priceNum = toNumber(safe.price);
 
     const addressFull =
       safe?.address?.full ||
@@ -145,12 +169,8 @@ export default function PremiumListing() {
       safe?.property?.unparsedAddress ||
       '';
 
-    const rawPhotos = safe?.photos || safe?.property?.photos || [];
-    const normalizedPhotos = (Array.isArray(rawPhotos) ? rawPhotos : [])
-      .map((p) => (typeof p === 'string' ? p : p?.url || p?.href || p?.src))
-      .filter(Boolean);
-
-    const finalPhotos = normalizedPhotos.length ? normalizedPhotos : placeholderListing.photos;
+    const normalizedPhotos = extractPhotosAnyShape(safe);
+    const finalPhotos = normalizedPhotos.length ? normalizedPhotos : [];
 
     return {
       ...safe,
@@ -161,10 +181,62 @@ export default function PremiumListing() {
   };
 
   const applyListingData = (listingData) => {
+    // ✅ expose to console
+    window.__LAST_LISTING__ = listingData;
+
     const normalized = normalizeListing(listingData);
+
     setListing(normalized);
-    setPhotos(normalized.__photos || placeholderListing.photos);
+
+    // Only use photos if we actually have them
+    if (normalized.__photos && normalized.__photos.length) {
+      setPhotos(normalized.__photos);
+      window.__LAST_LISTING_PHOTOS__ = normalized.__photos;
+    } else {
+      setPhotos([]); // allow hydration to fill
+      window.__LAST_LISTING_PHOTOS__ = [];
+    }
+
     setActivePhotoIndex(0);
+  };
+
+  const hydratePhotosById = async (id) => {
+    if (!id) return;
+
+    try {
+      const response = await fetch('https://onefloridagroup.com/wp-json/agentfire/v1/afx/listings/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          locations: [{ id: 'nefmls', geoType: 'market' }],
+          filters: { id },
+          options: { pageSize: 1, pageNumber: 1 },
+        }),
+      });
+
+      if (!response.ok) return;
+
+      const data = await response.json();
+
+      // handle both shapes
+      const listingData = data?.data?.listings?.[0] || data?.listings?.[0];
+      if (!listingData) return;
+
+      // ✅ expose hydrated raw too
+      window.__LAST_LISTING_HYDRATED__ = listingData;
+
+      const hydratedPhotos = extractPhotosAnyShape(listingData);
+
+      if (hydratedPhotos.length) {
+        setPhotos(hydratedPhotos);
+        window.__LAST_LISTING_PHOTOS__ = hydratedPhotos;
+        setActivePhotoIndex(0);
+      }
+    } catch (e) {
+      // don’t break the page if photos fail
+      // eslint-disable-next-line no-console
+      console.warn('Photo hydrate failed:', e);
+    }
   };
 
   // Catch crashes so we never go white
@@ -194,7 +266,7 @@ export default function PremiumListing() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Receive listing from parent iframe postMessage (AgentFire embed mode)
+  // Receive listing from parent iframe postMessage
   useEffect(() => {
     const onMessage = (event) => {
       try {
@@ -202,68 +274,74 @@ export default function PremiumListing() {
         if (!host.endsWith('onefloridagroup.com')) return;
 
         const msg = event.data;
+
         if (msg?.type === 'OFG_LISTING' && msg?.listing) {
           setError(null);
           setIsLoading(false);
+
           applyListingData(msg.listing);
+
+          // If parent payload had no photos, hydrate them
+          const incomingPhotos = extractPhotosAnyShape(msg.listing);
+          if (!incomingPhotos.length) {
+            const id = msg.listing?.id || msg.listing?.mlsId || mlsId;
+            hydratePhotosById(id);
+          }
         }
       } catch {
         // ignore
       }
     };
+
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mlsId]);
 
   // Standalone fetch (not iframe). In iframe mode parent sends data.
   useEffect(() => {
     const fetchListing = async () => {
       const isEmbedded = window.self !== window.top;
 
-      // no id => demo
+      // No id? demo
       if (!mlsId) {
         applyListingData(placeholderListing);
+        setPhotos(placeholderListing.photos);
         setIsLoading(false);
         return;
       }
 
-      // embedded => parent will postMessage real listing; show demo meanwhile
+      // Embedded? show placeholder while waiting for postMessage
       if (isEmbedded) {
         applyListingData(placeholderListing);
+        setPhotos(placeholderListing.photos);
         setIsLoading(false);
         return;
       }
 
       try {
-        const response = await fetch(
-          'https://onefloridagroup.com/wp-json/agentfire/v1/afx/listings/search',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              locations: [{ id: 'nefmls', geoType: 'market' }],
-              filters: { id: mlsId },
-              options: { pageSize: 1, pageNumber: 1 },
-            }),
-          }
-        );
+        const response = await fetch('https://onefloridagroup.com/wp-json/agentfire/v1/afx/listings/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            locations: [{ id: 'nefmls', geoType: 'market' }],
+            filters: { id: mlsId },
+            options: { pageSize: 1, pageNumber: 1 },
+          }),
+        });
 
         if (!response.ok) throw new Error('Failed to fetch listing');
 
         const data = await response.json();
+        const listingData = data?.data?.listings?.[0] || data?.listings?.[0];
+        if (!listingData) throw new Error('Listing not found');
 
-        // AgentFire responses vary; support both shapes
-        const listings =
-          data?.listings ||
-          data?.data?.listings ||
-          data?.data?.results ||
-          [];
+        setError(null);
+        applyListingData(listingData);
 
-        const arr = Array.isArray(listings) ? listings : [];
-        if (!arr.length) throw new Error('Listing not found');
-
-        applyListingData(arr[0]);
+        // If still no photos, try hydrating (sometimes search returns summary)
+        const foundPhotos = extractPhotosAnyShape(listingData);
+        if (!foundPhotos.length) hydratePhotosById(mlsId);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error('Fetch error:', err);
@@ -284,27 +362,14 @@ export default function PremiumListing() {
       ? listing.price
       : toNumber(listing?.price);
 
-  // ✅ IMPORTANT: normalize these so we never pass objects to UI
-  const beds =
-    toNumber(listing?.bedrooms) ??
-    toNumber(listing?.beds) ??
-    toNumber(listing?.property?.bedrooms) ??
-    toNumber(listing?.property?.beds) ??
-    null;
-
-  const baths =
-    normalizeBaths(listing?.bathrooms) ??
-    normalizeBaths(listing?.baths) ??
-    normalizeBaths(listing?.property?.bathrooms) ??
-    normalizeBaths(listing?.property?.baths) ??
-    null;
-
+  const beds = listing?.bedrooms || listing?.beds || listing?.property?.bedrooms || null;
+  const baths = listing?.bathrooms || listing?.baths || listing?.property?.bathrooms || null;
   const sqft =
-    toNumber(listing?.livingArea) ??
-    toNumber(listing?.sqft) ??
-    toNumber(listing?.squareFeet) ??
-    toNumber(listing?.property?.livingArea) ??
-    toNumber(listing?.property?.sqft) ??
+    listing?.livingArea ||
+    listing?.sqft ||
+    listing?.squareFeet ||
+    listing?.property?.livingArea ||
+    listing?.property?.sqft ||
     null;
 
   const lat = toNumber(listing?.latitude);
@@ -389,7 +454,6 @@ export default function PremiumListing() {
                 transition={{ delay: 0.2, duration: 0.6 }}
                 className="mb-8"
               >
-                {/* ✅ Pass only primitives; no objects */}
                 <ListingStats beds={beds} baths={baths} sqft={sqft} />
               </motion.div>
 
@@ -436,7 +500,6 @@ export default function PremiumListing() {
 
           <ListingAgent onScheduleClick={() => setIsDrawerOpen(true)} />
 
-          {/* IMPORTANT: only render map when coords are real numbers */}
           {hasCoords && (
             <PropertyMap
               address={listing?.address?.full}
