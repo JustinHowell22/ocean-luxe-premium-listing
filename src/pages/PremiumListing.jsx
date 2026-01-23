@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Loader2, AlertCircle } from 'lucide-react';
+
 import HeroGallery from '@/components/listing/HeroGallery';
 import ThumbnailStrip from '@/components/listing/ThumbnailStrip';
 import ContactBar, { FloatingContactButtons } from '@/components/listing/ContactBar';
@@ -52,14 +53,42 @@ class PremiumErrorBoundary extends React.Component {
   }
 }
 
+/**
+ * Safe numeric conversion for strings like "3,200", "$2,850,000", etc.
+ * Returns null if it can't be parsed.
+ */
 function toNumber(v) {
-  if (typeof v === 'number') return v;
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   if (typeof v === 'string') {
-    const cleaned = v.replace(/[^\d.]/g, '');
+    const cleaned = v.replace(/,/g, '').replace(/[^\d.]/g, '').trim();
+    if (!cleaned) return null;
     const n = Number(cleaned);
     return Number.isFinite(n) ? n : null;
   }
   return null;
+}
+
+/**
+ * Critical: MLS sometimes returns baths as an object like:
+ * { total: 3.5, full: 3, half: 1 }
+ * React cannot render objects => crash (your error #31).
+ * This returns a single number (like 3.5) or null.
+ */
+function normalizeBaths(b) {
+  if (b && typeof b === 'object') {
+    // prefer total if present
+    if (typeof b.total === 'number' && Number.isFinite(b.total)) return b.total;
+
+    const full = toNumber(b.full) ?? 0;
+    const half = toNumber(b.half) ?? 0;
+    const quarter = toNumber(b.quarter ?? b.qtr) ?? 0;
+    const threeQuarter = toNumber(b.threeQuarter ?? b.three_quarter) ?? 0;
+
+    const total = full + half * 0.5 + quarter * 0.25 + threeQuarter * 0.75;
+    return total > 0 ? total : null;
+  }
+  return toNumber(b);
 }
 
 export default function PremiumListing() {
@@ -102,12 +131,18 @@ export default function PremiumListing() {
 
   const normalizeListing = (raw) => {
     const safe = raw && typeof raw === 'object' ? raw : {};
-    const priceNum = toNumber(safe.price);
+
+    const priceNum =
+      toNumber(safe.price) ??
+      toNumber(safe.listPrice) ??
+      toNumber(safe.property?.price) ??
+      toNumber(safe.property?.listPrice);
 
     const addressFull =
       safe?.address?.full ||
       safe?.unparsedAddress ||
       safe?.property?.address?.full ||
+      safe?.property?.unparsedAddress ||
       '';
 
     const rawPhotos = safe?.photos || safe?.property?.photos || [];
@@ -159,7 +194,7 @@ export default function PremiumListing() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Receive listing from parent iframe postMessage
+  // Receive listing from parent iframe postMessage (AgentFire embed mode)
   useEffect(() => {
     const onMessage = (event) => {
       try {
@@ -186,37 +221,49 @@ export default function PremiumListing() {
     const fetchListing = async () => {
       const isEmbedded = window.self !== window.top;
 
+      // no id => demo
       if (!mlsId) {
         applyListingData(placeholderListing);
         setIsLoading(false);
         return;
       }
 
+      // embedded => parent will postMessage real listing; show demo meanwhile
       if (isEmbedded) {
-        // parent will post listing
         applyListingData(placeholderListing);
         setIsLoading(false);
         return;
       }
 
       try {
-        const response = await fetch('https://onefloridagroup.com/wp-json/agentfire/v1/afx/listings/search', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            locations: [{ id: 'nefmls', geoType: 'market' }],
-            filters: { id: mlsId },
-            options: { pageSize: 1, pageNumber: 1 },
-          }),
-        });
+        const response = await fetch(
+          'https://onefloridagroup.com/wp-json/agentfire/v1/afx/listings/search',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              locations: [{ id: 'nefmls', geoType: 'market' }],
+              filters: { id: mlsId },
+              options: { pageSize: 1, pageNumber: 1 },
+            }),
+          }
+        );
 
         if (!response.ok) throw new Error('Failed to fetch listing');
 
         const data = await response.json();
-        const listings = data?.data?.listings || [];
-        if (!listings.length) throw new Error('Listing not found');
 
-        applyListingData(listings[0]);
+        // AgentFire responses vary; support both shapes
+        const listings =
+          data?.listings ||
+          data?.data?.listings ||
+          data?.data?.results ||
+          [];
+
+        const arr = Array.isArray(listings) ? listings : [];
+        if (!arr.length) throw new Error('Listing not found');
+
+        applyListingData(arr[0]);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error('Fetch error:', err);
@@ -231,16 +278,33 @@ export default function PremiumListing() {
   }, [mlsId]);
 
   const safePhotos = photos?.length ? photos : placeholderListing.photos;
-  const priceNumber = typeof listing?.price === 'number' ? listing.price : toNumber(listing?.price);
 
-  const beds = listing?.bedrooms || listing?.beds || listing?.property?.bedrooms || null;
-  const baths = listing?.bathrooms || listing?.baths || listing?.property?.bathrooms || null;
+  const priceNumber =
+    typeof listing?.price === 'number'
+      ? listing.price
+      : toNumber(listing?.price);
+
+  // ✅ IMPORTANT: normalize these so we never pass objects to UI
+  const beds =
+    toNumber(listing?.bedrooms) ??
+    toNumber(listing?.beds) ??
+    toNumber(listing?.property?.bedrooms) ??
+    toNumber(listing?.property?.beds) ??
+    null;
+
+  const baths =
+    normalizeBaths(listing?.bathrooms) ??
+    normalizeBaths(listing?.baths) ??
+    normalizeBaths(listing?.property?.bathrooms) ??
+    normalizeBaths(listing?.property?.baths) ??
+    null;
+
   const sqft =
-    listing?.livingArea ||
-    listing?.sqft ||
-    listing?.squareFeet ||
-    listing?.property?.livingArea ||
-    listing?.property?.sqft ||
+    toNumber(listing?.livingArea) ??
+    toNumber(listing?.sqft) ??
+    toNumber(listing?.squareFeet) ??
+    toNumber(listing?.property?.livingArea) ??
+    toNumber(listing?.property?.sqft) ??
     null;
 
   const lat = toNumber(listing?.latitude);
@@ -289,7 +353,11 @@ export default function PremiumListing() {
         <ContactBar isScrolled={isScrolled} onScheduleClick={() => setIsDrawerOpen(true)} />
 
         <div className="relative">
-          <HeroGallery photos={safePhotos} activeIndex={activePhotoIndex} onPhotoChange={setActivePhotoIndex} />
+          <HeroGallery
+            photos={safePhotos}
+            activeIndex={activePhotoIndex}
+            onPhotoChange={setActivePhotoIndex}
+          />
 
           <div className="absolute bottom-0 left-0 right-0 z-10">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-8">
@@ -310,7 +378,9 @@ export default function PremiumListing() {
                 transition={{ delay: 0.1, duration: 0.6 }}
                 className="mb-6"
               >
-                <p className="text-xl sm:text-2xl text-white/90 font-light">{listing?.address?.full || ''}</p>
+                <p className="text-xl sm:text-2xl text-white/90 font-light">
+                  {listing?.address?.full || ''}
+                </p>
               </motion.div>
 
               <motion.div
@@ -319,6 +389,7 @@ export default function PremiumListing() {
                 transition={{ delay: 0.2, duration: 0.6 }}
                 className="mb-8"
               >
+                {/* ✅ Pass only primitives; no objects */}
                 <ListingStats beds={beds} baths={baths} sqft={sqft} />
               </motion.div>
 
@@ -355,7 +426,10 @@ export default function PremiumListing() {
           />
 
           {(listing?.virtualTourUrl || listing?.videoTourUrl) && (
-            <VirtualTours virtualTourUrl={listing?.virtualTourUrl} videoTourUrl={listing?.videoTourUrl} />
+            <VirtualTours
+              virtualTourUrl={listing?.virtualTourUrl}
+              videoTourUrl={listing?.videoTourUrl}
+            />
           )}
 
           <MortgageCalculator propertyPrice={priceNumber || undefined} />
@@ -364,11 +438,19 @@ export default function PremiumListing() {
 
           {/* IMPORTANT: only render map when coords are real numbers */}
           {hasCoords && (
-            <PropertyMap address={listing?.address?.full} latitude={lat} longitude={lng} />
+            <PropertyMap
+              address={listing?.address?.full}
+              latitude={lat}
+              longitude={lng}
+            />
           )}
         </div>
 
-        <ScheduleDrawer isOpen={isDrawerOpen} onClose={() => setIsDrawerOpen(false)} listing={listing} />
+        <ScheduleDrawer
+          isOpen={isDrawerOpen}
+          onClose={() => setIsDrawerOpen(false)}
+          listing={listing}
+        />
 
         <FullscreenGallery
           photos={safePhotos}
