@@ -1,35 +1,67 @@
 import React from 'react';
-import { Bed, Bath, Maximize } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { BedDouble, Bath, Ruler } from 'lucide-react';
+
+function safeNumber(value) {
+  if (value === null || value === undefined) return null;
+
+  // Handle object baths like { total, full, half }
+  if (typeof value === 'object') {
+    if (typeof value.total === 'number') return value.total;
+
+    const full = Number(value.full) || 0;
+    const half = Number(value.half) || 0;
+    const quarter = Number(value.quarter) || 0;
+    const threeQuarter = Number(value.threeQuarter) || 0;
+
+    const total = full + half * 0.5 + quarter * 0.25 + threeQuarter * 0.75;
+    return total > 0 ? total : null;
+  }
+
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+
+  if (typeof value === 'string') {
+    const cleaned = value.replace(/,/g, '').replace(/[^\d.]/g, '');
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  return null;
+}
 
 export default function ListingStats({ beds, baths, sqft }) {
-  const stats = [
-    { icon: Bed, value: beds, label: 'Beds' },
-    { icon: Bath, value: baths, label: 'Baths' },
-    { icon: Maximize, value: sqft?.toLocaleString(), label: 'Sq Ft' }
-  ].filter(stat => stat.value);
+  const safeBeds = safeNumber(beds);
+  const safeBaths = safeNumber(baths);
+  const safeSqft = safeNumber(sqft);
 
-  if (stats.length === 0) return null;
+  // If nothing valid, render nothing (prevents crashes)
+  if (!safeBeds && !safeBaths && !safeSqft) {
+    return null;
+  }
 
   return (
-    <div className="flex items-center gap-6 sm:gap-8">
-      {stats.map((stat, index) => (
-        <React.Fragment key={stat.label}>
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.3 + index * 0.1, duration: 0.5 }}
-            className="flex items-center gap-2"
-          >
-            <stat.icon className="w-5 h-5 text-teal-400" />
-            <span className="text-white font-semibold">{stat.value}</span>
-            <span className="text-white/60 hidden sm:inline">{stat.label}</span>
-          </motion.div>
-          {index < stats.length - 1 && (
-            <span className="text-white/20">•</span>
-          )}
-        </React.Fragment>
-      ))}
+    <div className="flex flex-wrap gap-6 text-white/90">
+      {safeBeds !== null && (
+        <div className="flex items-center gap-2">
+          <BedDouble className="w-5 h-5 text-teal-400" />
+          <span className="text-lg font-medium">{safeBeds} Beds</span>
+        </div>
+      )}
+
+      {safeBaths !== null && (
+        <div className="flex items-center gap-2">
+          <Bath className="w-5 h-5 text-teal-400" />
+          <span className="text-lg font-medium">{safeBaths} Baths</span>
+        </div>
+      )}
+
+      {safeSqft !== null && (
+        <div className="flex items-center gap-2">
+          <Ruler className="w-5 h-5 text-teal-400" />
+          <span className="text-lg font-medium">
+            {safeSqft.toLocaleString()} Sq Ft
+          </span>
+        </div>
+      )}
     </div>
   );
 }
